@@ -1,7 +1,17 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Aperture, Download, ImagePlus, RotateCcw, Square, X } from "lucide-react";
 import { fetchPortrait } from "@/lib/portrait/edit.functions";
-import { developLocal, LOCAL_PLAN } from "@/lib/portrait/local";
+import {
+  analyzePortrait,
+  BACKDROPS,
+  DEFAULT_OPTIONS,
+  developLocal,
+  EMPTY_ANALYSIS,
+  LOCAL_PLAN,
+  LOOKS,
+  type BackdropId,
+  type Options,
+} from "@/lib/portrait/local";
 import {
   STEP_COPY,
   WARDROBE_LABEL,
@@ -142,6 +152,7 @@ export function Studio() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [opts, setOpts] = useState<Options>(DEFAULT_OPTIONS);
   const [resume, setResume] = useState<{ source: string; index: number } | null>(null);
 
   useEffect(() => {
@@ -183,11 +194,20 @@ export function Studio() {
     setPhase("running");
 
     try {
+      if (opts.replaceBg || opts.retouch > 0 || startIndex === 0) {
+        setNotice("Loading on-device AI (first time takes a few seconds)…");
+      }
+      const analysis = await analyzePortrait(original ?? startSource);
+      setNotice(
+        analysis.ai || !opts.replaceBg
+          ? null
+          : "On-device AI couldn’t load, so the backdrop uses a soft edge wash instead.",
+      );
       for (let i = startIndex; i < plan.length; i++) {
         cursor = i;
         setStepIndex(i);
         const step = plan[i]!;
-        const result = await developLocal(step, source).then(
+        const result = await developLocal(step, source, opts, analysis).then(
           (url) => ({ ok: true as const, url }),
           () => ({ ok: false as const, error: "That pass didn’t finish. Try it again." }),
         );
@@ -270,6 +290,8 @@ export function Studio() {
       const result = await developLocal(
         "print",
         await shrinkForSource(current.url).catch(() => current.url),
+        opts,
+        EMPTY_ANALYSIS,
       ).then(
         (url) => ({ ok: true as const, url }),
         () => ({ ok: false as const, error: "The print refine didn’t finish. Try it again." }),
@@ -471,10 +493,93 @@ export function Studio() {
             </div>
           ) : null}
 
-          <p className="m-0 text-sm text-muted">
-            Free, on-device finish: tone, light, a pale backdrop, gentle skin retouch and a
-            head-and-shoulders crop. Your photo never leaves your phone.
-          </p>
+          <fieldset className="m-0 flex flex-col gap-4 border-0 p-0">
+            <legend className="text-xs font-medium tracking-widest text-muted uppercase">
+              Studio
+            </legend>
+            <p className="m-0 mt-2 text-sm text-muted">
+              Free and on-device — your photo never leaves your phone.
+            </p>
+            <button
+              type="button"
+              aria-pressed={opts.replaceBg}
+              disabled={running}
+              onClick={() => setOpts((o) => ({ ...o, replaceBg: !o.replaceBg }))}
+              className={`min-h-11 rounded-full px-4 text-sm font-medium ${
+                opts.replaceBg ? "bg-ink text-paper" : "bg-paper text-ink shadow-mat"
+              }`}
+            >
+              {opts.replaceBg ? "Replacing the background" : "Keep my background"}
+            </button>
+            <div className="flex flex-wrap gap-2">
+              {(Object.keys(BACKDROPS) as BackdropId[]).map((id) => {
+                const b = BACKDROPS[id];
+                const selected = opts.backdrop === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    aria-pressed={selected}
+                    disabled={running}
+                    onClick={() => setOpts((o) => ({ ...o, backdrop: id }))}
+                    className={`flex min-h-11 items-center gap-2 rounded-full px-3 text-sm ${
+                      selected ? "bg-ink text-paper" : "bg-paper text-ink shadow-mat"
+                    }`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="inline-block size-4 rounded-full"
+                      style={{
+                        background: `radial-gradient(rgb(${b.center.join(",")}), rgb(${b.edge.join(",")}))`,
+                        outline: "1px solid rgba(0,0,0,.25)",
+                      }}
+                    />
+                    {b.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {LOOKS.map((l) => (
+                <button
+                  key={l.id}
+                  type="button"
+                  aria-pressed={opts.look === l.id}
+                  disabled={running}
+                  onClick={() => setOpts((o) => ({ ...o, look: l.id }))}
+                  className={`min-h-11 rounded-full px-4 text-sm font-medium ${
+                    opts.look === l.id ? "bg-ink text-paper" : "bg-paper text-ink shadow-mat"
+                  }`}
+                >
+                  {l.label}
+                </button>
+              ))}
+            </div>
+            <label className="flex flex-col gap-1 text-sm text-ink">
+              Skin retouch
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={opts.retouch}
+                disabled={running}
+                onChange={(e) => setOpts((o) => ({ ...o, retouch: Number(e.target.value) }))}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-sm text-ink">
+              Studio light
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={opts.light}
+                disabled={running}
+                onChange={(e) => setOpts((o) => ({ ...o, light: Number(e.target.value) }))}
+              />
+            </label>
+          </fieldset>
 
           <div className="flex flex-col gap-2">
             {running ? (
