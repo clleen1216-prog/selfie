@@ -3,6 +3,7 @@ import { Aperture, Download, ImagePlus, RotateCcw, Square, X } from "lucide-reac
 import { fetchPortrait } from "@/lib/portrait/edit.functions";
 import {
   analyzePortrait,
+  pickBestShot,
   BACKDROPS,
   DEFAULT_OPTIONS,
   developLocal,
@@ -50,8 +51,8 @@ async function fileToJpeg(file: File): Promise<string> {
   const bitmap = await createImageBitmap(file).catch(() => {
     throw new Error("This browser couldn’t read that photograph. Try a JPEG or PNG.");
   });
-  let edge = 1280;
-  let quality = 0.86;
+  let edge = 1600;
+  let quality = 0.92;
   const draw = (maxEdge: number, q: number) => {
     const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
     const width = Math.max(1, Math.round(bitmap.width * scale));
@@ -65,20 +66,20 @@ async function fileToJpeg(file: File): Promise<string> {
     return canvas.toDataURL("image/jpeg", q);
   };
   let url = draw(edge, quality);
-  while (url.length > 680_000 && (quality > 0.5 || edge > 720)) {
+  while (url.length > 6_000_000 && (quality > 0.5 || edge > 720)) {
     if (quality > 0.5) quality -= 0.08;
     else edge = Math.round(edge * 0.85);
     url = draw(edge, quality);
   }
   bitmap.close();
-  if (url.length > 690_000) {
+  if (url.length > 7_000_000) {
     throw new Error("That photograph is still too large. Try a smaller one.");
   }
   return url;
 }
 
 async function shrinkForSource(url: string): Promise<string> {
-  if (!url.startsWith("data:") || url.length <= 680_000) return url;
+  if (!url.startsWith("data:") || url.length <= 6_000_000) return url;
   const blob = await (await fetch(url)).blob();
   const bitmap = await createImageBitmap(blob);
   let edge = 1280;
@@ -131,6 +132,8 @@ export function Studio() {
   const inputId = useId();
   const fileRef = useRef<HTMLInputElement>(null);
   const cancelRef = useRef(false);
+  const baseRef = useRef<string | null>(null);
+  const pickNote = useRef<string | null>(null);
   const runLock = useRef(false);
 
   const [ready, setReady] = useState<boolean | null>(null);
@@ -197,10 +200,10 @@ export function Studio() {
       if (opts.replaceBg || opts.retouch > 0 || startIndex === 0) {
         setNotice("Loading on-device AI (first time takes a few seconds)…");
       }
-      const analysis = await analyzePortrait(original ?? startSource);
+      const analysis = await analyzePortrait(baseRef.current ?? original ?? startSource);
       setNotice(
         analysis.ai || !opts.replaceBg
-          ? null
+          ? pickNote.current
           : "On-device AI couldn’t load, so the backdrop uses a soft edge wash instead.",
       );
       for (let i = startIndex; i < plan.length; i++) {
@@ -244,11 +247,23 @@ export function Studio() {
     }
   }
 
-  function develop() {
+  async function develop() {
     if (!original) return;
     const plan = LOCAL_PLAN;
     setLockedPlan(plan);
-    void runFrom(original, 0, plan);
+    let base = original;
+    pickNote.current = null;
+    if (angles.length > 0) {
+      setNotice("Choosing your best photograph…");
+      const all = [original, ...angles];
+      const { index } = await pickBestShot(all).catch(() => ({ index: 0 }));
+      base = all[index] ?? original;
+      if (index > 0) {
+        pickNote.current = `Used photograph ${index + 1} — the sharpest, best-lit and most front-facing of your set.`;
+      }
+    }
+    baseRef.current = base;
+    void runFrom(base, 0, plan);
   }
 
   function retry() {
@@ -446,7 +461,7 @@ export function Studio() {
                 More angles
               </p>
               <p className="mt-1 text-sm leading-relaxed text-muted">
-                Optional. Up to three other views of the same person, used only to lock the face.
+                Optional. Add up to three more photos of yourself. The studio picks the sharpest, best-lit, most front-facing one to develop.
               </p>
               <div className="mt-2 flex flex-wrap gap-2">
                 {angles.map((angle, index) => (
@@ -734,6 +749,17 @@ export function Studio() {
                       Warm pale-bone ground, soft light, a plain top. You’ll see each pass as it
                       finishes.
                     </p>
+                    <figure className="m-0 mt-5 flex items-center gap-3">
+                      <img
+                        src="/examples/reference.jpg"
+                        alt="Example of a stylised studio portrait"
+                        className="size-20 shrink-0 rounded-lg object-cover"
+                      />
+                      <figcaption className="text-xs leading-relaxed text-paper/60">
+                        Example: a stylised portrait made with generative AI. This free on-device
+                        studio finishes your own photo — it doesn’t restyle it.
+                      </figcaption>
+                    </figure>
                   </div>
                 </div>
               )}

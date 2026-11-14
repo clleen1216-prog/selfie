@@ -136,7 +136,7 @@ export async function analyzePortrait(source: string): Promise<Analysis> {
         let sum = 0;
         for (let i = 0; i < data.length; i += 7) sum += data[i]!;
         const share = sum / (data.length / 7);
-        if (share > 0.04 && share < 0.97) mask = { w, h, data };
+        if (share > 0.04 && share < 0.97) mask = refineMask({ w, h, data }, canvas);
       }
       res.close?.();
     } catch {
@@ -221,6 +221,77 @@ function blur(src: Px, radius: number): Uint8ClampedArray {
   return a;
 }
 
+
+function sampleBilinear(d: Float32Array, w: number, h: number, fx: number, fy: number): number {
+  const x = Math.min(w - 1, Math.max(0, fx * w - 0.5));
+  const y = Math.min(h - 1, Math.max(0, fy * h - 0.5));
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const x1 = Math.min(w - 1, x0 + 1);
+  const y1 = Math.min(h - 1, y0 + 1);
+  const tx = x - x0;
+  const ty = y - y0;
+  return lerp(
+    lerp(d[y0 * w + x0]!, d[y0 * w + x1]!, tx),
+    lerp(d[y1 * w + x0]!, d[y1 * w + x1]!, tx),
+    ty,
+  );
+}
+
+/**
+ * The person model works at 256px, so its edge is soft and blocky. A guided
+ * filter snaps that edge to the real edges in the photo (hair, ears, shoulders).
+ */
+function refineMask(m: { w: number; h: number; data: Float32Array }, photo: HTMLCanvasElement) {
+  const scale = Math.min(1, 800 / Math.max(photo.width, photo.height));
+  const gw = Math.max(8, Math.round(photo.width * scale));
+  const gh = Math.max(8, Math.round(photo.height * scale));
+  const small = document.createElement("canvas");
+  small.width = gw;
+  small.height = gh;
+  const sctx = small.getContext("2d", { willReadFrequently: true })!;
+  sctx.drawImage(photo, 0, 0, gw, gh);
+  const px = sctx.getImageData(0, 0, gw, gh).data;
+  const n = gw * gh;
+  const I = new Float32Array(n);
+  const P = new Float32Array(n);
+  for (let y = 0; y < gh; y++) {
+    for (let x = 0; x < gw; x++) {
+      const i = y * gw + x;
+      I[i] = (0.299 * px[i * 4]! + 0.587 * px[i * 4 + 1]! + 0.114 * px[i * 4 + 2]!) / 255;
+      P[i] = sampleBilinear(m.data, m.w, m.h, (x + 0.5) / gw, (y + 0.5) / gh);
+    }
+  }
+  const r = Math.max(4, Math.round(Math.max(gw, gh) / 70));
+  const eps = 0.004;
+  const mI = blurMask(I, gw, gh, r);
+  const mP = blurMask(P, gw, gh, r);
+  const II = new Float32Array(n);
+  const IP = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    II[i] = I[i]! * I[i]!;
+    IP[i] = I[i]! * P[i]!;
+  }
+  const cII = blurMask(II, gw, gh, r);
+  const cIP = blurMask(IP, gw, gh, r);
+  const A = new Float32Array(n);
+  const B = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const varI = cII[i]! - mI[i]! * mI[i]!;
+    const cov = cIP[i]! - mI[i]! * mP[i]!;
+    A[i] = cov / (varI + eps);
+    B[i] = mP[i]! - A[i]! * mI[i]!;
+  }
+  const mA = blurMask(A, gw, gh, r);
+  const mB = blurMask(B, gw, gh, r);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const q = mA[i]! * I[i]! + mB[i]!;
+    out[i] = smooth(0.3, 0.7, Math.min(1, Math.max(0, q)));
+  }
+  return { w: gw, h: gh, data: out };
+}
+
 /** Box blur for a single-channel float image, two passes. */
 function blurMask(m: Float32Array, w: number, h: number, radius: number): Float32Array {
   let a: Float32Array = m;
@@ -250,19 +321,17 @@ function blurMask(m: Float32Array, w: number, h: number, radius: number): Float3
   return a;
 }
 
-/** Person mask resampled to the working size, hardened a little, then feathered. */
+/** Person mask resampled to the working size and lightly feathered. */
 function matteFor(an: Analysis, w: number, h: number): Float32Array | null {
   const m = an.mask;
   if (!m) return null;
   const out = new Float32Array(w * h);
   for (let y = 0; y < h; y++) {
-    const my = Math.min(m.h - 1, Math.floor((y / h) * m.h));
     for (let x = 0; x < w; x++) {
-      const mx = Math.min(m.w - 1, Math.floor((x / w) * m.w));
-      out[y * w + x] = smooth(0.35, 0.7, m.data[my * m.w + mx]!);
+      out[y * w + x] = smooth(0.4, 0.6, sampleBilinear(m.data, m.w, m.h, (x + 0.5) / w, (y + 0.5) / h));
     }
   }
-  return blurMask(out, w, h, Math.max(1.5, w / 260));
+  return blurMask(out, w, h, Math.max(1, w / 700));
 }
 
 /* ---------- passes ---------- */
@@ -403,16 +472,19 @@ function retouch(p: Px, o: Options, an: Analysis): Px {
       if (!skin) continue;
       const diff = Math.abs(r - soft[i]!) + Math.abs(g - soft[i + 1]!) + Math.abs(b - soft[i + 2]!);
       const amt = 0.6 * strength * region * (1 - smooth(30, 90, diff)); // keep real edges and texture
-      data[i] = r + (soft[i]! - r) * amt;
-      data[i + 1] = g + (soft[i + 1]! - g) * amt;
-      data[i + 2] = b + (soft[i + 2]! - b) * amt;
+      // studio powder: calm specular shine on forehead and nose
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      const shine = 1 - 0.22 * strength * region * smooth(195, 245, lum);
+      data[i] = (r + (soft[i]! - r) * amt) * shine;
+      data[i + 1] = (g + (soft[i + 1]! - g) * amt) * shine;
+      data[i + 2] = (b + (soft[i + 2]! - b) * amt) * shine;
     }
   }
   return p;
 }
 
-function sharpen(p: Px, amount: number): Px {
-  const soft = blur(p, Math.max(1, Math.min(p.w, p.h) / 700));
+function sharpen(p: Px, amount: number, radiusDiv = 700): Px {
+  const soft = blur(p, Math.max(1, Math.min(p.w, p.h) / radiusDiv));
   for (let i = 0; i < p.data.length; i += 4) {
     for (let c = 0; c < 3; c++) {
       p.data[i + c] = clamp(p.data[i + c]! + (p.data[i + c]! - soft[i + c]!) * amount);
@@ -436,24 +508,45 @@ function drawRect(p: Px, sx: number, sy: number, sw: number, sh: number, outW: n
   return { data: img.data, w: img.width, h: img.height };
 }
 
-/** 4:5 head-and-shoulders crop, placed around the face when one was found. */
-function polishCrop(p: Px, an: Analysis, maxEdge: number): Px {
+/** 4:5 head-and-shoulders crop around the face; headroom is padded with backdrop when needed. */
+function polishCrop(p: Px, an: Analysis, o: Options, maxEdge: number): Px {
   const aspect = 4 / 5;
-  let cw = Math.min(p.w, p.h * aspect);
+  const maxW = Math.min(p.w, p.h * aspect);
+  let cw = maxW;
   let ch = cw / aspect;
   let left = (p.w - cw) / 2;
   let top = (p.h - ch) * 0.2;
   const face = an.face;
+  const canPad = o.replaceBg && Boolean(an.mask);
   if (face) {
-    const facePx = face.w * p.w;
-    const want = Math.max(facePx / 0.36, 0); // face ≈ 36% of the frame width
-    cw = Math.min(Math.min(p.w, p.h * aspect), Math.max(want, Math.min(p.w, p.h * aspect) * 0.55));
+    cw = Math.min(maxW, Math.max((face.w * p.w) / 0.38, maxW * 0.5)); // face ≈ 38% of the frame
     ch = cw / aspect;
     left = Math.min(p.w - cw, Math.max(0, face.cx * p.w - cw / 2));
-    top = Math.min(p.h - ch, Math.max(0, face.cy * p.h - ch * 0.4));
+    const want = face.cy * p.h - ch * 0.4; // eyes a little above centre
+    top = Math.min(p.h - ch, want);
+    top = canPad ? Math.max(-ch * 0.3, top) : Math.max(0, top);
   }
   const scale = Math.min(1, maxEdge / ch);
-  return drawRect(p, left, top, cw, ch, cw * scale, ch * scale);
+  const outW = Math.max(1, Math.round(cw * scale));
+  const outH = Math.max(1, Math.round(ch * scale));
+  if (top >= 0) return drawRect(p, left, top, cw, ch, outW, outH);
+
+  // Headroom above the photo: stretch the top row (a smooth backdrop) upward.
+  const src = document.createElement("canvas");
+  src.width = p.w;
+  src.height = p.h;
+  src.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(p.data), p.w, p.h), 0, 0);
+  const out = document.createElement("canvas");
+  out.width = outW;
+  out.height = outH;
+  const ctx = out.getContext("2d", { willReadFrequently: true })!;
+  ctx.imageSmoothingQuality = "high";
+  const padPx = Math.ceil(-top * scale);
+  ctx.drawImage(src, left, 0, cw, 2, 0, 0, outW, padPx + 1);
+  ctx.drawImage(src, left, 0, cw, ch + top, 0, padPx, outW, outH - padPx);
+  const img = ctx.getImageData(0, 0, outW, outH);
+  // blend the seam so the stretched strip never shows an edge
+  return { data: img.data, w: img.width, h: img.height };
 }
 
 /** One free pass. Steps the browser can't do are returned unchanged. */
@@ -479,10 +572,10 @@ export async function developLocal(
       p = retouch(p, opts, analysis);
       break;
     case "polish":
-      p = sharpen(polishCrop(p, analysis, 1280), 0.5);
+      p = sharpen(sharpen(polishCrop(p, analysis, opts, 1600), 0.5), 0.18, 60);
       break;
     case "print": {
-      const scale = 2000 / Math.max(p.w, p.h);
+      const scale = 2400 / Math.max(p.w, p.h);
       p = sharpen(drawRect(p, 0, 0, p.w, p.h, p.w * scale, p.h * scale), 0.4);
       return toUrl(p, 0.95);
     }
@@ -490,4 +583,78 @@ export async function developLocal(
       break;
   }
   return toUrl(p);
+}
+
+/** Of several photos of the same person, pick the sharpest, best-lit, most front-facing one. */
+export async function pickBestShot(urls: string[]): Promise<{ index: number }> {
+  if (urls.length < 2) return { index: 0 };
+  const vision = await loadVision().catch(() => null);
+  const rows: { sharp: number; expo: number; front: number; size: number }[] = [];
+  for (const url of urls) {
+    try {
+      const full = await toCanvas(url);
+      const s = 480 / Math.max(full.width, full.height);
+      const c = document.createElement("canvas");
+      c.width = Math.max(8, Math.round(full.width * s));
+      c.height = Math.max(8, Math.round(full.height * s));
+      const ctx = c.getContext("2d", { willReadFrequently: true })!;
+      ctx.drawImage(full, 0, 0, c.width, c.height);
+      const px = ctx.getImageData(0, 0, c.width, c.height).data;
+      const w = c.width;
+      const h = c.height;
+      const gray = new Float32Array(w * h);
+      let mean = 0;
+      let clipped = 0;
+      for (let i = 0; i < w * h; i++) {
+        const l = 0.299 * px[i * 4]! + 0.587 * px[i * 4 + 1]! + 0.114 * px[i * 4 + 2]!;
+        gray[i] = l;
+        mean += l;
+        if (l < 8 || l > 247) clipped++;
+      }
+      mean /= w * h;
+      let acc = 0;
+      let acc2 = 0;
+      let cnt = 0;
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          const i = y * w + x;
+          const lap = 4 * gray[i]! - gray[i - 1]! - gray[i + 1]! - gray[i - w]! - gray[i + w]!;
+          acc += lap;
+          acc2 += lap * lap;
+          cnt++;
+        }
+      }
+      const sharp = acc2 / cnt - (acc / cnt) ** 2;
+      const expo = Math.max(0, 1 - Math.abs(mean - 135) / 110 - clipped / (w * h));
+      let front = 0.3;
+      let size = 0.3;
+      if (vision?.detector) {
+        const det = vision.detector.detect(full);
+        const d = det.detections?.[0];
+        if (d?.boundingBox) {
+          size = Math.min(1, d.boundingBox.width / full.width / 0.4);
+          const k = d.keypoints;
+          if (k && k.length >= 3) {
+            const eyes = Math.abs(k[1].x - k[0].x) || 0.01;
+            const yaw = (k[2].x - (k[0].x + k[1].x) / 2) / eyes;
+            front = 1 - Math.min(1, Math.abs(yaw) * 2);
+          } else front = 0.6;
+        }
+      }
+      rows.push({ sharp, expo, front, size });
+    } catch {
+      rows.push({ sharp: 0, expo: 0, front: 0, size: 0 });
+    }
+  }
+  const maxSharp = Math.max(1e-6, ...rows.map((r) => r.sharp));
+  let best = 0;
+  let bestScore = -1;
+  rows.forEach((r, i) => {
+    const score = 0.5 * (r.sharp / maxSharp) + 0.15 * r.expo + 0.2 * r.front + 0.15 * r.size;
+    if (score > bestScore) {
+      bestScore = score;
+      best = i;
+    }
+  });
+  return { index: best };
 }
