@@ -1,8 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Aperture, Download, ImagePlus, RotateCcw, Square, X } from "lucide-react";
-import { developPortrait, fetchPortrait, studioReady } from "@/lib/portrait/edit.functions";
+import { fetchPortrait } from "@/lib/portrait/edit.functions";
+import { developLocal, LOCAL_PLAN } from "@/lib/portrait/local";
 import {
-  planFor,
   STEP_COPY,
   WARDROBE_LABEL,
   WARDS,
@@ -145,17 +145,7 @@ export function Studio() {
   const [resume, setResume] = useState<{ source: string; index: number } | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    studioReady()
-      .then((result) => {
-        if (!cancelled) setReady(result.ready);
-      })
-      .catch(() => {
-        if (!cancelled) setReady(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    setReady(true);
   }, []);
 
   async function takeFile(file: File | undefined) {
@@ -197,15 +187,10 @@ export function Studio() {
         cursor = i;
         setStepIndex(i);
         const step = plan[i]!;
-        const result = await developPortrait({
-          data: {
-            sessionId,
-            step,
-            sources: [source, ...angles].slice(0, 4),
-            wardrobe,
-            keepClothes,
-          },
-        });
+        const result = await developLocal(step, source).then(
+          (url) => ({ ok: true as const, url }),
+          () => ({ ok: false as const, error: "That pass didn’t finish. Try it again." }),
+        );
         if (cancelRef.current) {
           if (result.ok) {
             const kept = [...nextFrames, { step, url: result.url }];
@@ -241,13 +226,13 @@ export function Studio() {
 
   function develop() {
     if (!original) return;
-    const plan = planFor(mode, keepClothes);
+    const plan = LOCAL_PLAN;
     setLockedPlan(plan);
     void runFrom(original, 0, plan);
   }
 
   function retry() {
-    const plan = lockedPlan ?? planFor(mode, keepClothes);
+    const plan = lockedPlan ?? LOCAL_PLAN;
     if (!resume || !original) {
       develop();
       return;
@@ -282,15 +267,13 @@ export function Studio() {
     setPrinting(true);
     setCompare(false);
     try {
-      const result = await developPortrait({
-        data: {
-          sessionId,
-          step: "print",
-          sources: [await shrinkForSource(current.url).catch(() => current.url), ...angles].slice(0, 4),
-          wardrobe,
-          keepClothes,
-        },
-      });
+      const result = await developLocal(
+        "print",
+        await shrinkForSource(current.url).catch(() => current.url),
+      ).then(
+        (url) => ({ ok: true as const, url }),
+        () => ({ ok: false as const, error: "The print refine didn’t finish. Try it again." }),
+      );
       if (!result.ok) {
         setError(result.error);
         setPhase(frames.length ? "done" : "error");
@@ -322,7 +305,7 @@ export function Studio() {
 
   const running = phase === "running";
   const viewed = frames[active] ?? null;
-  const prospective = planFor(mode, keepClothes);
+  const prospective = LOCAL_PLAN;
   const planSteps = phase === "idle" && frames.length === 0 ? prospective : (lockedPlan ?? prospective);
   const activeStep: StepId | null = printing
     ? "print"
@@ -488,88 +471,10 @@ export function Studio() {
             </div>
           ) : null}
 
-          <fieldset className="m-0 flex flex-col gap-3 border-0 p-0">
-            <legend className="text-xs font-medium tracking-widest text-muted uppercase">
-              Wardrobe
-            </legend>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              {WARDS.map((color) => {
-                const selected = wardrobe === color;
-                return (
-                  <button
-                    key={color}
-                    type="button"
-                    aria-pressed={selected}
-                    disabled={running}
-                    onClick={() => setWardrobe(color)}
-                    className={`inline-flex min-h-11 items-center justify-center gap-2 rounded-full px-3 text-sm font-medium ${
-                      selected ? "bg-ink text-paper" : "bg-paper text-ink shadow-mat"
-                    }`}
-                  >
-                    <span
-                      className={`size-3 shrink-0 rounded-full ${
-                        color === "black"
-                          ? "bg-cloth-black"
-                          : color === "charcoal"
-                            ? "bg-cloth-charcoal"
-                            : color === "cream"
-                              ? "bg-cloth-cream"
-                              : "bg-cloth-taupe"
-                      } ${selected ? "ring-2 ring-paper" : "ring-1 ring-ink/15"}`}
-                      aria-hidden="true"
-                    />
-                    {WARDROBE_LABEL[color]}
-                  </button>
-                );
-              })}
-            </div>
-            <button
-              type="button"
-              aria-pressed={keepClothes}
-              disabled={running}
-              onClick={() => setKeepClothes((value) => !value)}
-              className={`min-h-11 rounded-full px-4 text-left text-sm ${
-                keepClothes ? "bg-ink text-paper" : "bg-paper text-ink shadow-mat"
-              }`}
-            >
-              {keepClothes ? "Keeping the clothes in the photo" : "Keep the clothes in the photo"}
-            </button>
-          </fieldset>
-
-          <fieldset className="m-0 border-0 p-0">
-            <legend className="text-xs font-medium tracking-widest text-muted uppercase">
-              How to develop
-            </legend>
-            <div className="mt-3 grid grid-cols-3 gap-2">
-              {(
-                [
-                  ["careful", "Sequence"],
-                  ["session", "Session"],
-                  ["sitting", "Sitting"],
-                ] as const
-              ).map(([id, label]) => {
-                const selected = mode === id;
-                const count = planFor(id, keepClothes).length;
-                return (
-                  <button
-                    key={id}
-                    type="button"
-                    aria-pressed={selected}
-                    disabled={running}
-                    onClick={() => setMode(id)}
-                    className={`min-h-11 rounded-full px-2 text-sm font-medium ${
-                      selected ? "bg-ink text-paper" : "bg-paper text-ink shadow-mat"
-                    }`}
-                  >
-                    {label}
-                    <span className={`ml-1 tabular-nums ${selected ? "text-paper/70" : "text-muted"}`}>
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </fieldset>
+          <p className="m-0 text-sm text-muted">
+            Free, on-device finish: tone, light, a pale backdrop, gentle skin retouch and a
+            head-and-shoulders crop. Your photo never leaves your phone.
+          </p>
 
           <div className="flex flex-col gap-2">
             {running ? (
