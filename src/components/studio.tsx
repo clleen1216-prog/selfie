@@ -67,6 +67,30 @@ async function fileToJpeg(file: File): Promise<string> {
   return url;
 }
 
+async function shrinkForSource(url: string): Promise<string> {
+  if (!url.startsWith("data:") || url.length <= 680_000) return url;
+  const blob = await (await fetch(url)).blob();
+  const bitmap = await createImageBitmap(blob);
+  let edge = 1280;
+  let quality = 0.86;
+  const draw = (maxEdge: number, q: number) => {
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/jpeg", q);
+  };
+  let out = draw(edge, quality);
+  while (out.length > 680_000 && (quality > 0.5 || edge > 720)) {
+    if (quality > 0.5) quality -= 0.08;
+    else edge = Math.round(edge * 0.85);
+    out = draw(edge, quality);
+  }
+  bitmap.close();
+  return out;
+}
+
 async function savePortrait(url: string, filename: string) {
   if (url.startsWith("data:")) {
     const anchor = document.createElement("a");
@@ -162,7 +186,7 @@ export function Studio() {
     setNotice(null);
     setCompare(false);
     setPrinting(false);
-    let source = startSource;
+    let source = await shrinkForSource(startSource).catch(() => startSource);
     const nextFrames = frames.slice(0, startIndex);
     let cursor = startIndex;
     setFrames(nextFrames);
@@ -199,7 +223,7 @@ export function Studio() {
           setPhase("error");
           return;
         }
-        source = result.url;
+        source = await shrinkForSource(result.url).catch(() => result.url);
         nextFrames.push({ step, url: result.url });
         setFrames([...nextFrames]);
         setActive(nextFrames.length - 1);
@@ -262,7 +286,7 @@ export function Studio() {
         data: {
           sessionId,
           step: "print",
-          sources: [current.url, ...angles].slice(0, 4),
+          sources: [await shrinkForSource(current.url).catch(() => current.url), ...angles].slice(0, 4),
           wardrobe,
           keepClothes,
         },

@@ -75,19 +75,6 @@ function imageHostAllowed(hostname: string): boolean {
 }
 
 function normalizeSource(source: string): { url: string } | { error: string } {
-  if (source.startsWith("https://")) {
-    if (source.length > 2000) return { error: "That image link isn’t valid." };
-    let parsed: URL;
-    try {
-      parsed = new URL(source);
-    } catch {
-      return { error: "That image link isn’t valid." };
-    }
-    if (!imageHostAllowed(parsed.hostname)) {
-      return { error: "Only a photograph from this sitting can be continued." };
-    }
-    return { url: source };
-  }
   if (!/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=\s]+$/.test(source)) {
     return { error: "Use a JPEG, PNG, or WebP photograph." };
   }
@@ -118,8 +105,11 @@ function apiMessage(body: unknown): string {
 
 function publicError(status: number, raw: string): string {
   const clipped = raw.replace(/\s+/g, " ").slice(0, 240);
-  if (/credit|spending-limit|spending limit|subscription|quota/i.test(clipped)) {
-    return "Portrait generation is paused — the studio’s image credits are used up. Add credits, then try again.";
+  if (/credit|spending-limit|spending limit|subscription|quota|billing|exceeded your current/i.test(clipped)) {
+    return "Portrait generation is paused — the Google API quota is used up. Check billing or wait for the quota to reset, then try again.";
+  }
+  if (/api key not valid|api_key_invalid|permission denied|invalid api key/i.test(clipped)) {
+    return "The studio’s Google API key isn’t valid. Check GEMINI_API_KEY in Vercel.";
   }
   if (status === 401 || status === 403) {
     return "The studio can’t reach the portrait model right now.";
@@ -133,34 +123,65 @@ function publicError(status: number, raw: string): string {
   return "The portrait pass didn’t finish. Try this pass again.";
 }
 
-type EditBody = {
-  data?: { url?: string; b64_json?: string; mime_type?: string }[];
+type GeminiPart = {
+  text?: string;
+  inlineData?: { mimeType?: string; data?: string };
+  inline_data?: { mime_type?: string; data?: string };
+};
+type GeminiBody = {
+  candidates?: { content?: { parts?: GeminiPart[] }; finishReason?: string }[];
+  promptFeedback?: { blockReason?: string };
 };
 
-function imageFromBody(body: EditBody): string | null {
-  const first = body.data?.[0];
-  if (!first) return null;
-  if (typeof first.url === "string" && first.url.startsWith("https://")) return first.url;
-  if (typeof first.b64_json === "string" && first.b64_json.length > 32) {
-    const mime = first.mime_type?.startsWith("image/") ? first.mime_type : "image/jpeg";
-    return `data:${mime};base64,${first.b64_json}`;
+function imageFromBody(body: GeminiBody): string | null {
+  for (const candidate of body.candidates ?? []) {
+    for (const part of candidate.content?.parts ?? []) {
+      const inline = part.inlineData ?? part.inline_data;
+      const data = inline?.data;
+      if (typeof data === "string" && data.length > 32) {
+        const raw = (inline as { mimeType?: string; mime_type?: string }).mimeType ??
+          (inline as { mime_type?: string }).mime_type;
+        const mime = raw?.startsWith("image/") ? raw : "image/png";
+        return `data:${mime};base64,${data}`;
+      }
+    }
   }
   return null;
 }
 
+function blockedByPolicy(body: GeminiBody): boolean {
+  if (body.promptFeedback?.blockReason) return true;
+  return (body.candidates ?? []).some((c) =>
+    /SAFETY|PROHIBITED|IMAGE_OTHER|BLOCK/i.test(c.finishReason ?? ""),
+  );
+}
+
+const GEMINI_MODEL = process.env.GEMINI_IMAGE_MODEL?.trim() || "gemini-2.5-flash-image";
+
 async function postEdit(
   apiKey: string,
-  payload: Record<string, unknown>,
-): Promise<{ status: number; body: unknown; text: string }> {
-  const res = await fetch("https://api.x.ai/v1/images/edits", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  model: string,
+  prompt: string,
+  urls: string[],
+  aspect: boolean,
+): Promise<{ status: number; body: unknown }> {
+  const parts: Record<string, unknown>[] = [{ text: prompt }];
+  for (const url of urls) {
+    const m = /^data:(image\/(?:jpeg|png|webp));base64,(.+)$/.exec(url);
+    if (!m) throw new Error("bad source");
+    parts.push({ inline_data: { mime_type: m[1], data: m[2] } });
+  }
+  const generationConfig: Record<string, unknown> = { responseModalities: ["IMAGE"] };
+  if (aspect) generationConfig.imageConfig = { aspectRatio: "2:3" };
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({ contents: [{ parts }], generationConfig }),
+      signal: AbortSignal.timeout(55_000),
     },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(85_000),
-  });
+  );
   const text = await res.text();
   let body: unknown = null;
   try {
@@ -168,15 +189,11 @@ async function postEdit(
   } catch {
     body = null;
   }
-  return { status: res.status, body, text };
-}
-
-function isModelMiss(status: number, message: string): boolean {
-  return status === 404 || /model|not found|does not exist|unknown/i.test(message);
+  return { status: res.status, body };
 }
 
 export const studioReady = createServerFn({ method: "GET" }).handler(async () => {
-  return { ready: Boolean(process.env.XAI_API_KEY) };
+  return { ready: Boolean(process.env.GEMINI_API_KEY?.trim()) };
 });
 
 export const developPortrait = createServerFn({ method: "POST" })
@@ -195,7 +212,7 @@ export const developPortrait = createServerFn({ method: "POST" })
       return { ok: false, error: "That request didn’t look right." };
     }
 
-    const apiKey = process.env.XAI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY?.trim();
     if (!apiKey) {
       return { ok: false, error: "Portrait generation isn’t available right now." };
     }
@@ -211,41 +228,27 @@ export const developPortrait = createServerFn({ method: "POST" })
     const slot = slotState(data.sessionId);
     if ("error" in slot) return { ok: false, error: slot.error };
 
-    const prompt = [
+    const basePrompt = [
       urls.length > 1 ? MULTI_ANGLE : "",
       promptFor(data.step, data.wardrobe, data.keepClothes),
     ]
       .filter(Boolean)
       .join(" ");
     const wantsAspect = data.step === "sitting" || data.step === "finish" || data.step === "polish";
-    let resolution = data.step === "print" || data.step === "sitting" || data.step === "polish" || data.step === "finish" ? "2k" : "1k";
 
-    let model = "grok-imagine-image-2.0";
     let aspect = wantsAspect;
     let useAllAngles = urls.length > 1;
-    let attemptedModelFallback = false;
     let attemptedShapeFallback = false;
     let attemptedRetry = false;
 
     for (let attempt = 0; attempt < 3; attempt++) {
-      const payload: Record<string, unknown> = {
-        model,
-        prompt,
-        response_format: "url",
-        n: 1,
-        resolution,
-      };
-      if (useAllAngles) {
-        payload.images = urls.map((url) => ({ url, type: "image_url" }));
-      } else {
-        payload.image = { url: urls[0], type: "image_url" };
-      }
-      if (aspect) payload.aspect_ratio = "2:3";
+      const sent = useAllAngles ? urls : [urls[0]!];
+      const prompt = useAllAngles ? basePrompt : basePrompt.replace(MULTI_ANGLE, "").trim();
 
       let status = 0;
       let body: unknown = null;
       try {
-        const posted = await postEdit(apiKey, payload);
+        const posted = await postEdit(apiKey, GEMINI_MODEL, prompt, sent, aspect);
         status = posted.status;
         body = posted.body;
       } catch {
@@ -258,8 +261,12 @@ export const developPortrait = createServerFn({ method: "POST" })
       }
 
       if (status >= 200 && status < 300) {
-        const url = imageFromBody((body ?? {}) as EditBody);
+        const parsed = (body ?? {}) as GeminiBody;
+        const url = imageFromBody(parsed);
         if (!url) {
+          if (blockedByPolicy(parsed)) {
+            return { ok: false, error: "That photograph couldn’t be used for a portrait. Try another." };
+          }
           return { ok: false, error: "The portrait came back empty. Try this pass again." };
         }
         commitSlot(data.sessionId);
@@ -267,15 +274,9 @@ export const developPortrait = createServerFn({ method: "POST" })
       }
 
       const message = apiMessage(body);
-      if (!attemptedModelFallback && isModelMiss(status, message)) {
-        attemptedModelFallback = true;
-        model = "grok-imagine-image";
-        continue;
-      }
-      if (!attemptedShapeFallback && status === 400 && (aspect || resolution === "2k" || useAllAngles)) {
+      if (!attemptedShapeFallback && status === 400 && (aspect || useAllAngles)) {
         attemptedShapeFallback = true;
         if (useAllAngles) useAllAngles = false;
-        else if (resolution === "2k") resolution = "1k";
         else aspect = false;
         continue;
       }
