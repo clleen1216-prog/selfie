@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bone: #efe6da;
+  --color-paper: #f7f1e8;
+  --color-ink: #1c1714;
+  --color-muted: #74685e;
+  --color-umber: #8d4d34;
+  --color-umber-deep: #6e3a26;
+  --color-cloth-black: #141210;
+  --color-cloth-charcoal: #4a453f;
+  --color-cloth-cream: #f4efe6;
+  --color-cloth-taupe: #8c7b6b;
+  --font-sans: "Outfit", "Avenir Next", sans-serif;
+  --font-display: "Fraunces", "Iowan Old Style", Palatino, serif;
+  --shadow-mat:
+    0px 0px 0px 1px rgba(28, 23, 20, 0.06),
+    0px 1px 2px -1px rgba(28, 23, 20, 0.06),
+    0px 12px 32px -16px rgba(28, 23, 20, 0.18);
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-bone);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+}
+
+.frame-angle {
+  aspect-ratio: 3 / 4;
+}
+
+.frame-proof {
+  aspect-ratio: 2 / 3;
+}
+
+.thumb {
+  width: 4.25rem;
+  height: 5.5rem;
+}
+
+.compare-range {
+  width: 100%;
+  height: 2.75rem;
+  margin: 0;
+  accent-color: var(--color-paper);
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .developing-veil {
+    animation: halide-wash 1.8s ease-in-out infinite;
+  }
+}
+
+@keyframes halide-wash {
+  0%,
+  100% {
+    opacity: 0.12;
+  }
+  50% {
+    opacity: 0.38;
+  }
+}

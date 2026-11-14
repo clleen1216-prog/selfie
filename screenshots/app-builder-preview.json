@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Halide",
+      "hasCanvas": false,
+      "bodyTextLen": 952,
+      "bodyTextHash": "11dcecb66db916b6612d1fb40e1eb03b58594e7a1b0aa9047ee39be8a2276ddb",
+      "bodyTextPrefix": "PORTRAIT STUDIO Halide A studio portrait from the photograph you",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Halide",
+      "hasCanvas": false,
+      "bodyTextLen": 874,
+      "bodyTextHash": "817787ddd0362785111d35deb6f48f316a345e0ce8a6cac0c1e1c556cd08310a",
+      "bodyTextPrefix": "PORTRAIT STUDIO Halide Place a photograph A selfie is enough. Fa",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}
