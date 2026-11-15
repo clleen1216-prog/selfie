@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Aperture, Download, ImagePlus, RotateCcw, Square, X } from "lucide-react";
-import { fetchPortrait } from "@/lib/portrait/edit.functions";
+import { developPortrait, fetchPortrait, studioReady } from "@/lib/portrait/edit.functions";
 import {
   analyzePortrait,
   pickBestShot,
@@ -78,8 +78,8 @@ async function fileToJpeg(file: File): Promise<string> {
   return url;
 }
 
-async function shrinkForSource(url: string): Promise<string> {
-  if (!url.startsWith("data:") || url.length <= 6_000_000) return url;
+async function shrinkForSource(url: string, limit = 6_000_000): Promise<string> {
+  if (!url.startsWith("data:") || url.length <= limit) return url;
   const blob = await (await fetch(url)).blob();
   const bitmap = await createImageBitmap(blob);
   let edge = 1280;
@@ -93,7 +93,7 @@ async function shrinkForSource(url: string): Promise<string> {
     return canvas.toDataURL("image/jpeg", q);
   };
   let out = draw(edge, quality);
-  while (out.length > 680_000 && (quality > 0.5 || edge > 720)) {
+  while (out.length > limit - 20_000 && (quality > 0.5 || edge > 480)) {
     if (quality > 0.5) quality -= 0.08;
     else edge = Math.round(edge * 0.85);
     out = draw(edge, quality);
@@ -156,11 +156,25 @@ export function Studio() {
   const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [opts, setOpts] = useState<Options>(DEFAULT_OPTIONS);
+  const [aiMode, setAiMode] = useState(false);
+  const [aiReady, setAiReady] = useState(false);
+  const [userKey, setUserKey] = useState("");
   const [resume, setResume] = useState<{ source: string; index: number } | null>(null);
 
   useEffect(() => {
-    setReady(true);
+    try {
+      setUserKey(localStorage.getItem("halide-ai-key") ?? "");
+    } catch {
+      /* storage unavailable */
+    }
+    studioReady()
+      .then((r) => setAiReady(r.ready))
+      .catch(() => setAiReady(false));
   }, []);
+
+  useEffect(() => {
+    setReady(!aiMode || aiReady || userKey.trim().length >= 20);
+  }, [aiMode, aiReady, userKey]);
 
   async function takeFile(file: File | undefined) {
     if (!file) return;
@@ -249,6 +263,10 @@ export function Studio() {
 
   async function develop() {
     if (!original) return;
+    if (aiMode) {
+      await developAI();
+      return;
+    }
     const plan = LOCAL_PLAN;
     setLockedPlan(plan);
     let base = original;
@@ -264,6 +282,62 @@ export function Studio() {
     }
     baseRef.current = base;
     void runFrom(base, 0, plan);
+  }
+
+  async function developAI() {
+    if (!original || !sessionId || runLock.current) return;
+    runLock.current = true;
+    cancelRef.current = false;
+    setError(null);
+    setNotice(null);
+    setCompare(false);
+    setPrinting(false);
+    setResume(null);
+    setFrames([]);
+    setLockedPlan(["sitting"]);
+    setStepIndex(0);
+    setPhase("running");
+    try {
+      const all = [original, ...angles];
+      let first = 0;
+      if (all.length > 1) {
+        setNotice("Choosing your best photograph…");
+        first = (await pickBestShot(all).catch(() => ({ index: 0 }))).index;
+      }
+      const ordered = [all[first]!, ...all.filter((_, i) => i !== first)].slice(0, 4);
+      const sources = await Promise.all(
+        ordered.map((u) => shrinkForSource(u, 680_000).catch(() => u)),
+      );
+      setNotice(
+        first > 0 ? `Used photograph ${first + 1} as the main reference.` : "Developing with AI — this takes up to a minute…",
+      );
+      const key = userKey.trim();
+      const result = await developPortrait({
+        data: {
+          sessionId,
+          step: "sitting",
+          sources,
+          wardrobe,
+          keepClothes,
+          apiKey: key.length >= 20 ? key : undefined,
+        },
+      });
+      setNotice(null);
+      if (!result.ok) {
+        setError(result.error);
+        setPhase("error");
+        return;
+      }
+      setFrames([{ step: "sitting", url: result.url }]);
+      setActive(0);
+      setPhase("done");
+    } catch {
+      setNotice(null);
+      setError("The AI pass didn’t finish. Try it again.");
+      setPhase("error");
+    } finally {
+      runLock.current = false;
+    }
   }
 
   function retry() {
@@ -508,6 +582,94 @@ export function Studio() {
             </div>
           ) : null}
 
+          <div className="grid grid-cols-2 gap-2">
+            {(
+              [
+                [false, "Free · on-device"],
+                [true, "AI mode"],
+              ] as const
+            ).map(([val, label]) => (
+              <button
+                key={label}
+                type="button"
+                aria-pressed={aiMode === val}
+                disabled={running}
+                onClick={() => setAiMode(val)}
+                className={`min-h-11 rounded-full px-3 text-sm font-medium ${
+                  aiMode === val ? "bg-ink text-paper" : "bg-paper text-ink shadow-mat"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {aiMode ? (
+            <fieldset className="m-0 flex flex-col gap-4 border-0 p-0">
+              <legend className="text-xs font-medium tracking-widest text-muted uppercase">
+                AI studio
+              </legend>
+              <p className="m-0 mt-2 text-sm leading-relaxed text-muted">
+                Google’s Gemini image model rebuilds your photo as a studio portrait in one pass,
+                using all your photos for the face. Only the photos you add are sent to Google.
+              </p>
+              {!aiReady ? (
+                <label className="flex flex-col gap-1 text-sm text-ink">
+                  Your Google AI Studio key
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="AIza…"
+                    value={userKey}
+                    disabled={running}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setUserKey(v);
+                      try {
+                        localStorage.setItem("halide-ai-key", v.trim());
+                      } catch {
+                        /* storage unavailable */
+                      }
+                    }}
+                    className="min-h-11 rounded-lg bg-paper px-3 text-ink shadow-mat"
+                  />
+                  <span className="text-xs text-muted">
+                    Stays in this browser. It is sent only with your own requests and never stored
+                    on the server. Image models need a key with billing enabled — you pay Google,
+                    not this site.
+                  </span>
+                </label>
+              ) : null}
+              <div className="flex flex-wrap gap-2">
+                {WARDS.map((color) => (
+                  <button
+                    key={color}
+                    type="button"
+                    aria-pressed={wardrobe === color}
+                    disabled={running || keepClothes}
+                    onClick={() => setWardrobe(color)}
+                    className={`min-h-11 rounded-full px-4 text-sm font-medium ${
+                      wardrobe === color && !keepClothes ? "bg-ink text-paper" : "bg-paper text-ink shadow-mat"
+                    }`}
+                  >
+                    {WARDROBE_LABEL[color]}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                aria-pressed={keepClothes}
+                disabled={running}
+                onClick={() => setKeepClothes((v) => !v)}
+                className={`min-h-11 rounded-full px-4 text-sm font-medium ${
+                  keepClothes ? "bg-ink text-paper" : "bg-paper text-ink shadow-mat"
+                }`}
+              >
+                {keepClothes ? "Keeping the clothes in the photo" : "Keep the clothes in the photo"}
+              </button>
+            </fieldset>
+          ) : (
           <fieldset className="m-0 flex flex-col gap-4 border-0 p-0">
             <legend className="text-xs font-medium tracking-widest text-muted uppercase">
               Studio
@@ -595,6 +757,7 @@ export function Studio() {
               />
             </label>
           </fieldset>
+          )}
 
           <div className="flex flex-col gap-2">
             {running ? (
@@ -653,7 +816,7 @@ export function Studio() {
             </p>
             {ready === false ? (
               <p className="text-sm text-umber-deep" role="status">
-                Portrait generation isn’t available in this environment yet.
+                Paste your Google AI Studio key above to use AI mode, or switch back to the free on-device mode.
               </p>
             ) : null}
           </div>

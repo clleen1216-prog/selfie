@@ -13,6 +13,8 @@ export type DevelopInput = {
   sources: string[];
   wardrobe: Wardrobe;
   keepClothes: boolean;
+  /** Visitor's own Google AI Studio key (bring-your-own-key). Never stored. */
+  apiKey?: string;
 };
 
 export type DevelopResult =
@@ -106,7 +108,7 @@ function apiMessage(body: unknown): string {
 function publicError(status: number, raw: string): string {
   const clipped = raw.replace(/\s+/g, " ").slice(0, 240);
   if (/credit|spending-limit|spending limit|subscription|quota|billing|exceeded your current/i.test(clipped)) {
-    return "Portrait generation is paused — the Google API quota is used up. Check billing or wait for the quota to reset, then try again.";
+    return "AI mode is paused — Google says this key has no image quota left. Image models usually need billing turned on for the key’s project; otherwise wait for the quota to reset.";
   }
   if (/api key not valid|api_key_invalid|permission denied|invalid api key/i.test(clipped)) {
     return "The studio’s Google API key isn’t valid. Check GEMINI_API_KEY in Vercel.";
@@ -212,7 +214,11 @@ export const developPortrait = createServerFn({ method: "POST" })
       return { ok: false, error: "That request didn’t look right." };
     }
 
-    const apiKey = process.env.GEMINI_API_KEY?.trim();
+    const own =
+      typeof data.apiKey === "string" && /^[A-Za-z0-9_-]{20,120}$/.test(data.apiKey.trim())
+        ? data.apiKey.trim()
+        : null;
+    const apiKey = own ?? process.env.GEMINI_API_KEY?.trim();
     if (!apiKey) {
       return { ok: false, error: "Portrait generation isn’t available right now." };
     }
@@ -225,8 +231,10 @@ export const developPortrait = createServerFn({ method: "POST" })
       urls.push(source.url);
     }
 
-    const slot = slotState(data.sessionId);
-    if ("error" in slot) return { ok: false, error: slot.error };
+    if (!own) {
+      const slot = slotState(data.sessionId);
+      if ("error" in slot) return { ok: false, error: slot.error };
+    }
 
     const basePrompt = [
       urls.length > 1 ? MULTI_ANGLE : "",
@@ -269,7 +277,7 @@ export const developPortrait = createServerFn({ method: "POST" })
           }
           return { ok: false, error: "The portrait came back empty. Try this pass again." };
         }
-        commitSlot(data.sessionId);
+        if (!own) commitSlot(data.sessionId);
         return { ok: true, url };
       }
 
